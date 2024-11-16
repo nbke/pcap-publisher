@@ -1,0 +1,16 @@
+.{
+    .name = "pcap_publisher",
+    .version = "0.2.0",
+    .minimum_zig_version = "0.13.0",
+    .dependencies = .{
+        .pcap = .{
+            .url = "https://github.com/the-tcpdump-group/libpcap/archive/refs/tags/libpcap-1.10.5.tar.gz",
+            .hash = "1220b2a91034c890a1d5b7fbfdea4a528fdf2e95201d6cad61d56e24e5962c00da7a",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
