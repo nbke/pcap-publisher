@@ -1,10 +1,14 @@
 const std = @import("std");
 const mem = std.mem;
+const log = std.log;
 const sockaddr = std.c.sockaddr;
 const socklen_t = std.c.socklen_t;
+const timeval = std.c.timeval;
 const AF = std.posix.AF;
 
-const pcap_if = struct {
+const pcap_t = opaque {};
+
+const pcap_if = extern struct {
     next: ?*pcap_if,
     name: [*:0]const u8, // name to hand to "pcap_open_live()"
     description: ?[*:0]const u8, // textual description of interface, or NULL
@@ -12,13 +16,34 @@ const pcap_if = struct {
     flags: c_uint, // PCAP_IF_ interface flags
 };
 
-const pcap_addr = struct {
+const pcap_addr = extern struct {
     next: ?*pcap_addr,
     addr: ?*sockaddr, // address
     netmask: ?*sockaddr, // netmask for that address
     broadaddr: ?*sockaddr, // broadcast address for that address
     dstaddr: ?*sockaddr, // P2P destination address for that address
 };
+
+const pcap_pkthdr = extern struct {
+    ts: timeval, // time stamp
+    caplen: c_uint, // length of portion present in data
+    len: c_uint, // length of this packet prior to any slicing
+};
+
+const TstampPrecision = enum(c_int) {
+    Micro = 0,
+    Nano = 1,
+
+    fn from_str(name: []const u8) ?TstampPrecision {
+        const map = std.StaticStringMap(TstampPrecision).initComptime(.{
+            .{ "micro", .Micro },
+            .{ "nano", .Nano },
+        });
+        return map.get(name);
+    }
+};
+
+const pcap_handler = *const fn (user: ?*c_char, header: *const pcap_pkthdr, packet: *const c_char) callconv(.C) void;
 
 const PCAP_IF_LOOPBACK: c_uint = 0x00000001; // interface is loopback
 const PCAP_IF_UP: c_uint = 0x00000002; // interface is up
@@ -37,8 +62,29 @@ extern fn pcap_statustostr(errnum: c_int) callconv(.C) [*:0]const u8;
 extern fn pcap_findalldevs(alldevsp: *?*pcap_if, errbuf: [*:0]const u8) callconv(.C) c_int;
 extern fn pcap_freealldevs(alldevs: ?*pcap_if) callconv(.C) void;
 
+const PCAP_TSTAMP_ADAPTER: c_int = 3;
+extern fn pcap_create(device: [*:0]const u8, errbuf: [*:0]const u8) callconv(.C) ?*pcap_t;
+extern fn pcap_activate(p: *pcap_t) callconv(.C) c_int;
+extern fn pcap_set_snaplen(p: *pcap_t, snaplen: c_int) callconv(.C) c_int;
+extern fn pcap_set_promisc(p: *pcap_t, promisc: c_int) callconv(.C) c_int;
+extern fn pcap_set_immediate_mode(p: *pcap_t, immediate: c_int) callconv(.C) c_int;
+extern fn pcap_set_buffer_size(p: *pcap_t, buffer_size: c_int) callconv(.C) c_int;
+extern fn pcap_set_timeout(p: *pcap_t, timeout_ms: c_int) callconv(.C) c_int;
+extern fn pcap_set_tstamp_type(p: *pcap_t, tstamp_type: c_int) callconv(.C) c_int;
+extern fn pcap_tstamp_type_name_to_val(name: [*:0]const u8) callconv(.C) c_int;
+extern fn pcap_set_tstamp_precision(p: *pcap_t, tstamp_precision: c_int) callconv(.C) c_int;
+extern fn pcap_dispatch(p: *pcap_t, cnt: c_int, callback: pcap_handler, user: ?*c_char) callconv(.C) c_int;
+
 // defined in arpa/inet.h of libc:
 extern fn inet_ntop(af: c_int, src: *anyopaque, dst: [*]u8, size: socklen_t) callconv(.C) ?[*:0]const u8;
+
+// header and packet pointers are invalid after this callback returns
+fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: *const c_char) callconv(.C) void {
+    _ = user;
+    _ = header;
+    _ = packet;
+    std.debug.print("hi\n", .{});
+}
 
 fn write_sockaddr(writer: std.io.AnyWriter, addr: *sockaddr) !void {
     // POXIS defines INET_ADDRSTRLEN to 16 and INET6_ADDRSTRLEN to 46
@@ -185,16 +231,30 @@ const help_text =
     \\
     \\Usage: pcap_publisher [OPTIONS]
     \\
-    \\Options:
+    \\General Options:
     \\      --client-id <VALUE>  Unique identifier for this client
     \\      --uri <VALUE>        URI of MQTT broker [default: tcp://localhost:1883]
     \\      --prefix <VALUE>     Prefix of MQTT topic [default: ]
-    \\  -d, --dev <DEVICE>       Name of captured network interface
     \\  -f, --file <PATH>        Path to .pcap file for replay
     \\      --username <VALUE>   Username for MQTT broker (MQTT_USERNAME env variable)
     \\      --password <VALUE>   Password for MQTT broker (MQTT_PASSWORD env variable)
     \\  -h, --help               Print help
     \\  -V, --version            Print version
+    \\
+    \\Capture Options:
+    \\  -d, --dev <DEVICE>         Name of captured network interface
+    \\      --ts-type <ENUM>       Location where timestamp is recorded
+    \\          'host' -> Host adds timestamp rather than capture device
+    \\                    No commitment if timestamp will be low or high precision
+    \\          'host_lowprec' -> Host, low precision
+    \\          'host_hiprec' -> Host, high precision (Default)
+    \\          'host_hiprec_unsynced' -> Host, high precision, not synced with system time
+    \\          'adapter' -> Adapter, high precision, synced with system time
+    \\          'adapter_unsynced' -> Adapter, high precision, not synced with system time
+    \\      --ts-precision <ENUM>  Precision of network packet timestamps
+    \\          'micro' -> microsecond precision
+    \\          'nano' -> nanosecond precision (Default)
+    \\
 ;
 
 pub fn main() !void {
@@ -228,6 +288,8 @@ pub fn main() !void {
     var prefix: ?[:0]const u8 = null;
     var username: ?[:0]const u8 = null;
     var password: ?[:0]const u8 = null;
+    var timestamp_type: c_int = PCAP_TSTAMP_ADAPTER;
+    var timestamp_precision: TstampPrecision = .Nano;
 
     _ = args.skip(); // first argument is executable path
     while (args.next()) |arg| {
@@ -269,6 +331,26 @@ pub fn main() !void {
                 stderr.print("MQTT topic prefix must end with `/`: {s}\n", .{prefix.?}) catch {};
                 std.process.exit(1);
             }
+        } else if (mem.eql(u8, "--ts-type", arg)) {
+            const raw_ts_type = args.next() orelse {
+                stderr.print("Missing argument for --ts-type\n", .{}) catch {};
+                std.process.exit(1);
+            };
+            const ts_to_val_rc = pcap_tstamp_type_name_to_val(raw_ts_type.ptr);
+            if (ts_to_val_rc == -1) {
+                stderr.print("Invalid timestamp type: {s}\n", .{raw_ts_type}) catch {};
+                std.process.exit(1);
+            }
+            timestamp_type = ts_to_val_rc;
+        } else if (mem.eql(u8, "--ts-precision", arg)) {
+            const raw_ts_precision = args.next() orelse {
+                stderr.print("Missing argument for --ts-precision\n", .{}) catch {};
+                std.process.exit(1);
+            };
+            timestamp_precision = TstampPrecision.from_str(raw_ts_precision) orelse {
+                stderr.print("Invalid timestamp precision: {s}\n", .{raw_ts_precision}) catch {};
+                std.process.exit(1);
+            };
         } else if (mem.eql(u8, "--username", arg)) {
             username = args.next() orelse {
                 stderr.print("Missing argument for --username\n", .{}) catch {};
@@ -292,7 +374,48 @@ pub fn main() !void {
     }
 
     if (capture_dev) |dev| {
-        _ = dev; // TODO capture traffic
+        const handle = pcap_create(dev, &errbuf) orelse {
+            stderr.print("Failed to create capture device for '{s}': {s}\n", .{ dev, errbuf }) catch {};
+            std.process.exit(1);
+        };
+
+        // The calls to change settings only fail if `pcap_activate` was already called.
+        // Because of this we omit the error handling here. If a device i.e. does not
+        // support promiscuous mode, the activate call will raise an error.
+        // Immediate mode is needed because the packets should be sent directly via
+        // MQTT without delay instead of batching them.
+        _ = pcap_set_promisc(handle, 1);
+        _ = pcap_set_immediate_mode(handle, 1);
+        _ = pcap_set_snaplen(handle, 65535);
+        _ = pcap_set_buffer_size(handle, 64 << 20); // 64MB
+        _ = pcap_set_timeout(handle, 100); // 100ms
+
+        // Check if capture device supports requested timestamp type and precision
+        const ts_type_rc = pcap_set_tstamp_type(handle, timestamp_type);
+        if (ts_type_rc != 0) {
+            stderr.print("Failed to set timestamp type: {s}\n", .{pcap_statustostr(ts_type_rc)}) catch {};
+            std.process.exit(1);
+        }
+        const ts_prec_rc = pcap_set_tstamp_precision(handle, @intFromEnum(timestamp_precision));
+        if (ts_prec_rc != 0) {
+            stderr.print("Failed to set timestamp precision: {s}\n", .{pcap_statustostr(ts_prec_rc)}) catch {};
+            std.process.exit(1);
+        }
+
+        const activate_rc = pcap_activate(handle);
+        if (activate_rc != 0) {
+            stderr.print("Failed to start capture: {s}\n", .{pcap_statustostr(activate_rc)}) catch {};
+            std.process.exit(1);
+        }
+
+        while (true) {
+            // Dispatch will return either if the callback was triggered 50 times or the timeout was reached
+            const dispatch_rc = pcap_dispatch(handle, 50, capture_callback, null);
+            if (dispatch_rc != 0) {
+                log.warn("Could not run capture callback: {s}\n", .{pcap_statustostr(dispatch_rc)});
+                continue;
+            }
+        }
     } else if (pcap_file) |pcap| {
         _ = pcap; // TODO replay file
     } else {
