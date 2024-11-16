@@ -1,4 +1,5 @@
 const std = @import("std");
+const mem = std.mem;
 const sockaddr = std.c.sockaddr;
 const socklen_t = std.c.socklen_t;
 const AF = std.posix.AF;
@@ -174,13 +175,43 @@ fn list_network_devices(writer: std.io.AnyWriter, tty_config: std.io.tty.Config,
     }
 }
 
+const help_text =
+    \\Capture network traffic using libpcap and publish it via MQTT.
+    \\By default the hostname is used as client ID and all packets are
+    \\captured from the first available network interface.
+    \\
+    \\If PCAP file file is supplied, the packets are replayed instead of
+    \\capturing live traffic from the network interface.
+    \\
+    \\Usage: pcap_publisher [OPTIONS]
+    \\
+    \\Options:
+    \\      --client-id <VALUE>  Unique identifier for this client
+    \\      --uri <VALUE>        URI of MQTT broker [default: tcp://localhost:1883]
+    \\      --prefix <VALUE>     Prefix of MQTT topic [default: ]
+    \\  -d, --dev <DEVICE>       Name of captured network interface
+    \\  -f, --file <PATH>        Path to .pcap file for replay
+    \\      --username <VALUE>   Username for MQTT broker (MQTT_USERNAME env variable)
+    \\      --password <VALUE>   Password for MQTT broker (MQTT_PASSWORD env variable)
+    \\  -h, --help               Print help
+    \\  -V, --version            Print version
+;
+
 pub fn main() !void {
     const stderr = std.io.getStdErr().writer();
 
     const tty_config = std.io.tty.detectConfig(std.io.getStdOut());
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
+    defer bw.flush() catch {};
     const stdout = bw.writer();
+
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
 
     var errbuf: [PCAP_ERRBUF_SIZE:0]u8 = undefined;
     const init_rc = pcap_init(PCAP_CHAR_ENC_UTF_8, &errbuf);
@@ -189,15 +220,96 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    var alldevs: ?*pcap_if = null;
-    const fad_rc = pcap_findalldevs(&alldevs, &errbuf);
-    if (fad_rc != 0) {
-        stderr.print("Can't list network devices: {s}\n", .{pcap_statustostr(fad_rc)}) catch {};
+    var verbose_level: u32 = 0;
+    var capture_dev: ?[:0]const u8 = null;
+    var pcap_file: ?[:0]const u8 = null;
+    var broker_uri: ?[:0]const u8 = null;
+    var client_id: ?[:0]const u8 = null;
+    var prefix: ?[:0]const u8 = null;
+    var username: ?[:0]const u8 = null;
+    var password: ?[:0]const u8 = null;
+
+    _ = args.skip(); // first argument is executable path
+    while (args.next()) |arg| {
+        if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
+            // Bypass the buffered writer for stdout, because we will call exit()
+            try stdout_file.writeAll(help_text);
+            std.process.exit(1);
+        } else if (mem.eql(u8, "-V", arg) or mem.eql(u8, "--version", arg)) {
+            try stdout.print("pcap_publisher {s}\n", .{"0.2"});
+            return;
+        } else if (mem.eql(u8, "-v", arg) or mem.eql(u8, "--verbose", arg)) {
+            verbose_level += 1;
+        } else if (mem.eql(u8, "-d", arg) or mem.eql(u8, "--dev", arg)) {
+            capture_dev = args.next() orelse {
+                stderr.print("Missing argument for --dev\n", .{}) catch {};
+                std.process.exit(1);
+            };
+        } else if (mem.eql(u8, "-f", arg) or mem.eql(u8, "--file", arg)) {
+            pcap_file = args.next() orelse {
+                stderr.print("Missing argument for --file\n", .{}) catch {};
+                std.process.exit(1);
+            };
+        } else if (mem.eql(u8, "--uri", arg)) {
+            broker_uri = args.next() orelse {
+                stderr.print("Missing argument for --uri\n", .{}) catch {};
+                std.process.exit(1);
+            };
+        } else if (mem.eql(u8, "--client-id", arg)) {
+            client_id = args.next() orelse {
+                stderr.print("Missing argument for --client-id\n", .{}) catch {};
+                std.process.exit(1);
+            };
+        } else if (mem.eql(u8, "-p", arg) or mem.eql(u8, "--prefix", arg)) {
+            prefix = args.next() orelse {
+                stderr.print("Missing argument for --prefix\n", .{}) catch {};
+                std.process.exit(1);
+            };
+            if (prefix.?.len == 0 or prefix.?[prefix.?.len - 1] != '/') {
+                stderr.print("MQTT topic prefix must end with `/`: {s}\n", .{prefix.?}) catch {};
+                std.process.exit(1);
+            }
+        } else if (mem.eql(u8, "--username", arg)) {
+            username = args.next() orelse {
+                stderr.print("Missing argument for --username\n", .{}) catch {};
+                std.process.exit(1);
+            };
+        } else if (mem.eql(u8, "--password", arg)) {
+            password = args.next() orelse {
+                stderr.print("Missing argument for --password\n", .{}) catch {};
+                std.process.exit(1);
+            };
+        } else {
+            stderr.print("Invalid argument: {s}\n", .{arg}) catch {};
+            std.process.exit(1);
+        }
+    }
+
+    if (capture_dev != null and pcap_file != null) {
+        stderr.writeAll("Choose between capturing live traffic with --dev and " ++
+            "replaying a PCAP with --file\n") catch {};
         std.process.exit(1);
     }
-    defer pcap_freealldevs(alldevs);
 
-    if (alldevs) |a| try list_network_devices(stdout.any(), tty_config, a);
+    if (capture_dev) |dev| {
+        _ = dev; // TODO capture traffic
+    } else if (pcap_file) |pcap| {
+        _ = pcap; // TODO replay file
+    } else {
+        var alldevs: ?*pcap_if = null;
+        const fad_rc = pcap_findalldevs(&alldevs, &errbuf);
+        if (fad_rc != 0) {
+            stderr.print("Can't list network devices: {s}\n", .{pcap_statustostr(fad_rc)}) catch {};
+            std.process.exit(1);
+        }
+        defer pcap_freealldevs(alldevs);
 
-    try bw.flush();
+        if (alldevs) |a| {
+            try list_network_devices(stdout.any(), tty_config, a);
+            try stdout.writeAll("\nChoose a network interface and run the program " ++
+                "again with --dev <name> to capture live traffic\n");
+        } else {
+            stderr.writeAll("Did not find any network interfaces\n") catch {};
+        }
+    }
 }
