@@ -1,5 +1,7 @@
 const std = @import("std");
 const sockaddr = std.c.sockaddr;
+const socklen_t = std.c.socklen_t;
+const AF = std.posix.AF;
 
 const pcap_if = struct {
     next: ?*pcap_if,
@@ -11,10 +13,10 @@ const pcap_if = struct {
 
 const pcap_addr = struct {
     next: ?*pcap_addr,
-    addr: *sockaddr, // address
-    netmask: *sockaddr, // netmask for that address
-    broadaddr: *sockaddr, // broadcast address for that address
-    dstaddr: *sockaddr, // P2P destination address for that address
+    addr: ?*sockaddr, // address
+    netmask: ?*sockaddr, // netmask for that address
+    broadaddr: ?*sockaddr, // broadcast address for that address
+    dstaddr: ?*sockaddr, // P2P destination address for that address
 };
 
 const PCAP_IF_LOOPBACK: c_uint = 0x00000001; // interface is loopback
@@ -33,6 +35,32 @@ extern fn pcap_init(opts: c_uint, errbuf: [*:0]const u8) callconv(.C) c_int;
 extern fn pcap_statustostr(errnum: c_int) callconv(.C) [*:0]const u8;
 extern fn pcap_findalldevs(alldevsp: *?*pcap_if, errbuf: [*:0]const u8) callconv(.C) c_int;
 extern fn pcap_freealldevs(alldevs: ?*pcap_if) callconv(.C) void;
+
+// defined in arpa/inet.h of libc:
+extern fn inet_ntop(af: c_int, src: *anyopaque, dst: [*]u8, size: socklen_t) callconv(.C) ?[*:0]const u8;
+
+fn write_sockaddr(writer: std.io.AnyWriter, addr: *sockaddr) !void {
+    // POXIS defines INET_ADDRSTRLEN to 16 and INET6_ADDRSTRLEN to 46
+    // https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/netinet_in.h.html
+    var buf: [64:0]u8 = undefined;
+    const result = switch (addr.family) {
+        AF.INET => blk: {
+            const addr_v4: *sockaddr.in = @alignCast(@ptrCast(addr));
+            break :blk inet_ntop(AF.INET, &addr_v4.addr, &buf, buf.len);
+        },
+        AF.INET6 => blk: {
+            const addr_v6: *sockaddr.in6 = @alignCast(@ptrCast(addr));
+            break :blk inet_ntop(AF.INET6, &addr_v6.addr, &buf, buf.len);
+        },
+        else => |af| (try std.fmt.bufPrintZ(&buf, "unsupported address family: {d}", .{af})).ptr,
+    };
+
+    if (result == null) {
+        const err: std.posix.E = @enumFromInt(std.c._errno().*);
+        return std.posix.unexpectedErrno(err);
+    }
+    try writer.writeAll(std.mem.sliceTo(&buf, 0));
+}
 
 fn list_network_devices(writer: std.io.AnyWriter, tty_config: std.io.tty.Config, alldevs: *pcap_if) !void {
     try writer.writeAll("Available network interfaces:\n");
@@ -99,6 +127,50 @@ fn list_network_devices(writer: std.io.AnyWriter, tty_config: std.io.tty.Config,
         try writer.writeByte(')');
         try tty_config.setColor(writer, .reset);
         try writer.writeByte('\n');
+
+        if (dev.description) |descr| {
+            try writer.print("    description: {s}\n", .{descr});
+        }
+
+        if (dev.addresses) |addresses| {
+            try writer.writeAll("    addresses: \n");
+            const indent = "        ";
+
+            var current_dev_addr: ?*pcap_addr = addresses;
+            while (current_dev_addr) |dev_addr| : (current_dev_addr = dev_addr.next) {
+                try writer.writeAll("      - ");
+                var write_indent = false;
+
+                if (dev_addr.addr) |addr| {
+                    if (write_indent) try writer.writeAll(indent);
+                    try writer.writeAll("address: ");
+                    try write_sockaddr(writer, addr);
+                    try writer.writeByte('\n');
+                    write_indent = true;
+                }
+                if (dev_addr.netmask) |netmask| {
+                    if (write_indent) try writer.writeAll(indent);
+                    try writer.writeAll("netmask: ");
+                    try write_sockaddr(writer, netmask);
+                    try writer.writeByte('\n');
+                    write_indent = true;
+                }
+                if (dev_addr.broadaddr) |broadaddr| {
+                    if (write_indent) try writer.writeAll(indent);
+                    try writer.writeAll("broadaddr: ");
+                    try write_sockaddr(writer, broadaddr);
+                    try writer.writeByte('\n');
+                    write_indent = true;
+                }
+                if (dev_addr.dstaddr) |dstaddr| {
+                    if (write_indent) try writer.writeAll(indent);
+                    try writer.writeAll("dstaddr: ");
+                    try write_sockaddr(writer, dstaddr);
+                    try writer.writeByte('\n');
+                    write_indent = true;
+                }
+            }
+        }
     }
 }
 
