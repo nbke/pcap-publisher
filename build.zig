@@ -48,6 +48,10 @@ fn build_pcap(b: *std.Build, target: ResolvedTarget, optimize: OptimizeMode) *St
             "pcap-common.c", "bpf_image.c", "bpf_filter.c", "bpf_dump.c",
         },
     });
+    if (target.result.os.tag == .linux) lib_pcap.addCSourceFiles(.{
+        .root = dep_pcap.path("."),
+        .files = &.{ "pcap-linux.c", "pcap-netfilter-linux.c", "fad-getad.c" },
+    });
     lib_pcap.addIncludePath(dep_pcap.path("."));
 
     const config_h_values = .{
