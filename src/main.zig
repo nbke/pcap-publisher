@@ -4,6 +4,7 @@ const log = std.log;
 const sockaddr = std.c.sockaddr;
 const socklen_t = std.c.socklen_t;
 const timeval = std.c.timeval;
+const timespec = std.posix.timespec;
 const AF = std.posix.AF;
 
 const pcap_t = opaque {};
@@ -43,7 +44,7 @@ const TstampPrecision = enum(c_int) {
     }
 };
 
-const pcap_handler = *const fn (user: ?*c_char, header: *const pcap_pkthdr, packet: *const c_char) callconv(.C) void;
+const pcap_handler = *const fn (user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_char) callconv(.C) void;
 
 const PCAP_IF_LOOPBACK: c_uint = 0x00000001; // interface is loopback
 const PCAP_IF_UP: c_uint = 0x00000002; // interface is up
@@ -74,16 +75,66 @@ extern fn pcap_set_tstamp_type(p: *pcap_t, tstamp_type: c_int) callconv(.C) c_in
 extern fn pcap_tstamp_type_name_to_val(name: [*:0]const u8) callconv(.C) c_int;
 extern fn pcap_set_tstamp_precision(p: *pcap_t, tstamp_precision: c_int) callconv(.C) c_int;
 extern fn pcap_dispatch(p: *pcap_t, cnt: c_int, callback: pcap_handler, user: ?*c_char) callconv(.C) c_int;
+extern fn pcap_get_tstamp_precision(p: *pcap_t) callconv(.C) c_int;
+extern fn pcap_geterr(p: *pcap_t) callconv(.C) [*:0]const u8;
 
 // defined in arpa/inet.h of libc:
 extern fn inet_ntop(af: c_int, src: *anyopaque, dst: [*]u8, size: socklen_t) callconv(.C) ?[*:0]const u8;
 
+const Userdata = struct {
+    gpa: mem.Allocator,
+    precision: TstampPrecision,
+};
+
 // header and packet pointers are invalid after this callback returns
-fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: *const c_char) callconv(.C) void {
-    _ = user;
-    _ = header;
-    _ = packet;
-    std.debug.print("hi\n", .{});
+fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_char) callconv(.C) void {
+    const userdata: *Userdata = @alignCast(@ptrCast(user.?));
+
+    // In nano precision mode the tv_nsec from timespec is stored in tv_usec from timeval.
+    // We convert Micros to Nanos so that we output standardized JSON.
+    // https://github.com/the-tcpdump-group/libpcap/blob/e17fe06d6a54abc85fb17998d0cb1742d490382a/pcap-bpf.c#L1398
+    const ts: timespec = switch (userdata.precision) {
+        .Micro => .{ .sec = header.ts.sec, .nsec = @as(isize, header.ts.usec) * 1_000 },
+        .Nano => .{ .sec = header.ts.sec, .nsec = header.ts.usec },
+    };
+
+    var buf = std.ArrayList(u8).init(userdata.gpa);
+    defer buf.deinit();
+    const pkt = @as([*]const u8, @ptrCast(packet))[0..header.caplen];
+    packet_to_json(buf.writer(), ts, header.len, pkt) catch |err| {
+        log.err("Can't convert packet to JSON: {s}", .{@errorName(err)});
+        return;
+    };
+    std.debug.print("{s}\n", .{buf.items});
+}
+
+// use `anytype` instead of `io.AnyWriter` for improved performance
+fn packet_to_json(writer: anytype, ts: timespec, len: usize, packet: []const u8) !void {
+    var json_stream = std.json.writeStream(writer, .{});
+    defer json_stream.deinit();
+    try json_stream.beginObject();
+
+    try json_stream.objectField("ts");
+    try json_stream.beginObject();
+    try json_stream.objectField("sec");
+    try json_stream.write(ts.sec);
+    try json_stream.objectField("nsec");
+    try json_stream.write(ts.nsec);
+    try json_stream.endObject();
+
+    try json_stream.objectField("len");
+    try json_stream.write(len);
+    try json_stream.objectField("caplen");
+    try json_stream.write(packet.len);
+
+    try json_stream.objectField("data");
+    try json_stream.beginWriteRaw();
+    try json_stream.stream.writeByte('"');
+    const Encoder = std.base64.standard.Encoder;
+    try Encoder.encodeWriter(json_stream.stream, packet);
+    try json_stream.stream.writeByte('"');
+    json_stream.endWriteRaw();
+    try json_stream.endObject();
 }
 
 fn write_sockaddr(writer: std.io.AnyWriter, addr: *sockaddr) !void {
@@ -408,11 +459,16 @@ pub fn main() !void {
             std.process.exit(1);
         }
 
+        const userdata: Userdata = .{
+            .gpa = allocator,
+            .precision = @enumFromInt(pcap_get_tstamp_precision(handle)),
+        };
         while (true) {
             // Dispatch will return either if the callback was triggered 50 times or the timeout was reached
-            const dispatch_rc = pcap_dispatch(handle, 50, capture_callback, null);
-            if (dispatch_rc != 0) {
-                log.warn("Could not run capture callback: {s}\n", .{pcap_statustostr(dispatch_rc)});
+            // If rc is positive, it represents the number of captured packets
+            const dispatch_rc = pcap_dispatch(handle, 50, capture_callback, @constCast(@ptrCast(&userdata)));
+            if (dispatch_rc < 0) {
+                log.err("Could not run capture callback: {s}", .{pcap_statustostr(dispatch_rc)});
                 continue;
             }
         }
