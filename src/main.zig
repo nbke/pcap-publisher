@@ -82,8 +82,11 @@ extern fn pcap_geterr(p: *pcap_t) callconv(.C) [*:0]const u8;
 extern fn inet_ntop(af: c_int, src: *anyopaque, dst: [*]u8, size: socklen_t) callconv(.C) ?[*:0]const u8;
 
 const Userdata = struct {
-    gpa: mem.Allocator,
     precision: TstampPrecision,
+    // paho-mqtt-c will copy the message to a newly allocated buffer
+    // Thus use a 100KB scratch buffer for the conversion of the packet to JSON
+    // 65535 / 3 * 4 = 87380 for payload encoded as base64
+    scratch: []u8,
 };
 
 // header and packet pointers are invalid after this callback returns
@@ -98,14 +101,14 @@ fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const
         .Nano => .{ .sec = header.ts.sec, .nsec = header.ts.usec },
     };
 
-    var buf = std.ArrayList(u8).init(userdata.gpa);
-    defer buf.deinit();
+    var fbs = std.io.fixedBufferStream(userdata.scratch);
     const pkt = @as([*]const u8, @ptrCast(packet))[0..header.caplen];
-    packet_to_json(buf.writer(), ts, header.len, pkt) catch |err| {
+    packet_to_json(fbs.writer(), ts, header.len, pkt) catch |err| {
         log.err("Can't convert packet to JSON: {s}", .{@errorName(err)});
         return;
     };
-    std.debug.print("{s}\n", .{buf.items});
+
+    std.debug.print("{s}\n", .{fbs.getWritten()}); // TODO only print in verbose mode
 }
 
 // use `anytype` instead of `io.AnyWriter` for improved performance
@@ -460,9 +463,10 @@ pub fn main() !void {
         }
 
         const userdata: Userdata = .{
-            .gpa = allocator,
             .precision = @enumFromInt(pcap_get_tstamp_precision(handle)),
+            .scratch = try allocator.alloc(u8, 100_000),
         };
+        defer allocator.free(userdata.scratch);
         while (true) {
             // Dispatch will return either if the callback was triggered 50 times or the timeout was reached
             // If rc is positive, it represents the number of captured packets
