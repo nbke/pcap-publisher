@@ -6,6 +6,9 @@ const OptimizeMode = std.builtin.OptimizeMode;
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    if (b.verbose) {
+        std.debug.print("Zig Triple: {s}\n", .{target.result.zigTriple(b.allocator) catch @panic("OOM")});
+    }
 
     const exe = b.addExecutable(.{
         .name = "pcap_publisher",
@@ -61,10 +64,7 @@ fn build_pcap(b: *std.Build, target: ResolvedTarget, optimize: OptimizeMode) *St
         .HAVE_DECL_ETHER_HOSTTON = "1",
         .HAVE_ETHER_HOSTTON = "1",
         .HAVE_FSEEKO = "1",
-        .HAVE_GNU_STRERROR_R = "1",
         .HAVE_INTTYPES_H = "1",
-        .HAVE_LINUX_GETNETBYNAME_R = "1",
-        .HAVE_LINUX_GETPROTOBYNAME_R = "1",
         .HAVE_LINUX_NET_TSTAMP_H = "1",
         .HAVE_LINUX_SOCKET_H = "1",
         .HAVE_LINUX_USBDEVICE_FS_H = "1",
@@ -96,6 +96,11 @@ fn build_pcap(b: *std.Build, target: ResolvedTarget, optimize: OptimizeMode) *St
         .style = .{ .cmake = dep_pcap.path("cmakeconfig.h.in") },
         .include_path = "config.h",
     }, config_h_values);
+    if (target.result.abi.isGnu()) config_h.addValues(.{
+        .HAVE_GNU_STRERROR_R = "1",
+        .HAVE_LINUX_GETNETBYNAME_R = "1",
+        .HAVE_LINUX_GETPROTOBYNAME_R = "1",
+    });
     lib_pcap.addIncludePath(config_h.getOutput().dirname());
 
     const cmd_lex = b.addSystemCommand(&.{ "lex", "-P", "pcap_" });
