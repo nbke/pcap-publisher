@@ -291,17 +291,24 @@ const help_text =
     \\If PCAP file file is supplied, the packets are replayed instead of
     \\capturing live traffic from the network interface.
     \\
-    \\Usage: pcap_publisher [OPTIONS]
+    \\Usage: pcap_publisher <COMMAND> [OPTIONS]
+    \\
+    \\Commands:
+    \\  capture [Default]        Live capture of packets from network interface
+    \\  replay                   Read packets from PCAP file
     \\
     \\General Options:
-    \\      --client-id <VALUE>  Unique identifier for this client
-    \\      --uri <VALUE>        URI of MQTT broker [default: tcp://localhost:1883]
-    \\      --prefix <VALUE>     Prefix of MQTT topic [default: ]
-    \\  -f, --file <PATH>        Path to .pcap file for replay
-    \\      --username <VALUE>   Username for MQTT broker (MQTT_USERNAME env variable)
-    \\      --password <VALUE>   Password for MQTT broker (MQTT_PASSWORD env variable)
     \\  -h, --help               Print help
     \\  -V, --version            Print version
+    \\  -v, --verbose            Increase logging level. Can be used multiple times
+    \\                           1: published JSON message
+    \\
+    \\MQTT Options:
+    \\      --uri <VALUE>        URI of MQTT broker [default: tcp://localhost:1883]
+    \\      --prefix <VALUE>     Prefix of MQTT topic
+    \\      --client-id <VALUE>  Unique identifier for this client
+    \\      --username <VALUE>   Username for MQTT broker (MQTT_USERNAME env variable)
+    \\      --password <VALUE>   Password for MQTT broker (MQTT_PASSWORD env variable)
     \\
     \\Capture Options:
     \\  -d, --dev <DEVICE>         Name of captured network interface
@@ -309,13 +316,16 @@ const help_text =
     \\          'host' -> Host adds timestamp rather than capture device
     \\                    No commitment if timestamp will be low or high precision
     \\          'host_lowprec' -> Host, low precision
-    \\          'host_hiprec' -> Host, high precision (Default)
+    \\          'host_hiprec' -> Host, high precision [Default]
     \\          'host_hiprec_unsynced' -> Host, high precision, not synced with system time
     \\          'adapter' -> Adapter, high precision, synced with system time
     \\          'adapter_unsynced' -> Adapter, high precision, not synced with system time
     \\      --ts-precision <ENUM>  Precision of network packet timestamps
     \\          'micro' -> microsecond precision
-    \\          'nano' -> nanosecond precision (Default)
+    \\          'nano' -> nanosecond precision [Default]
+    \\
+    \\Replay Options:
+    \\  -f, --file <PATH>        Path to .pcap file for replay
     \\
 ;
 
