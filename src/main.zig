@@ -82,6 +82,7 @@ extern fn pcap_geterr(p: *pcap_t) callconv(.C) [*:0]const u8;
 extern fn inet_ntop(af: c_int, src: *anyopaque, dst: [*]u8, size: socklen_t) callconv(.C) ?[*:0]const u8;
 
 const Userdata = struct {
+    verbose_level: u32,
     precision: TstampPrecision,
     // paho-mqtt-c will copy the message to a newly allocated buffer
     // Thus use a 100KB scratch buffer for the conversion of the packet to JSON
@@ -108,7 +109,14 @@ fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const
         return;
     };
 
-    std.debug.print("{s}\n", .{fbs.getWritten()}); // TODO only print in verbose mode
+    if (userdata.verbose_level > 0) {
+        var io_vecs = [_]std.posix.iovec_const{
+            .{ .base = fbs.buffer.ptr, .len = fbs.pos },
+            .{ .base = "\n".ptr, .len = 1 },
+        };
+        // ignore error if we can't print the JSON message
+        std.io.getStdOut().writevAll(&io_vecs) catch {};
+    }
 }
 
 // use `anytype` instead of `io.AnyWriter` for improved performance
@@ -463,6 +471,7 @@ pub fn main() !void {
         }
 
         const userdata: Userdata = .{
+            .verbose_level = verbose_level,
             .precision = @enumFromInt(pcap_get_tstamp_precision(handle)),
             .scratch = try allocator.alloc(u8, 100_000),
         };
