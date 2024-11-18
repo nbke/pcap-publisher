@@ -14,7 +14,21 @@ const pcap_if = extern struct {
     name: [*:0]const u8, // name to hand to "pcap_open_live()"
     description: ?[*:0]const u8, // textual description of interface, or NULL
     addresses: ?*pcap_addr,
-    flags: c_uint, // PCAP_IF_ interface flags
+    flags: pcap_flags,
+};
+
+const pcap_flags = packed struct(c_uint) {
+    loopback: bool,
+    up: bool,
+    running: bool,
+    wireless: bool,
+    connection_status: enum(u2) {
+        unknown = 0x0,
+        connected = 0x1,
+        disconnected = 0x2,
+        not_applicable = 0x3,
+    },
+    reserved: std.meta.Int(.unsigned, @bitSizeOf(c_uint) - 6) = 0,
 };
 
 const pcap_addr = extern struct {
@@ -66,16 +80,6 @@ const TstampPrecision = enum(c_int) {
 };
 
 const pcap_handler = *const fn (user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_char) callconv(.C) void;
-
-const PCAP_IF_LOOPBACK: c_uint = 0x00000001; // interface is loopback
-const PCAP_IF_UP: c_uint = 0x00000002; // interface is up
-const PCAP_IF_RUNNING: c_uint = 0x00000004; // interface is running
-const PCAP_IF_WIRELESS: c_uint = 0x00000008; // interface is wireless (*NOT* necessarily Wi-Fi!)
-const PCAP_IF_CONNECTION_STATUS: c_uint = 0x00000030; // connection status:
-const PCAP_IF_CONNECTION_STATUS_UNKNOWN: c_uint = 0x00000000; // unknown
-const PCAP_IF_CONNECTION_STATUS_CONNECTED: c_uint = 0x00000010; // connected
-const PCAP_IF_CONNECTION_STATUS_DISCONNECTED: c_uint = 0x00000020; // disconnected
-const PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE: c_uint = 0x00000030; // not applicable
 
 const PCAP_ERRBUF_SIZE = 256;
 const PCAP_CHAR_ENC_UTF_8: c_uint = 0x1;
@@ -207,14 +211,14 @@ fn list_network_devices(writer: std.io.AnyWriter, tty_config: std.io.tty.Config,
         try writer.writeByte('(');
 
         var needs_comma = false;
-        if ((dev.flags & PCAP_IF_LOOPBACK) > 0) {
+        if (dev.flags.loopback) {
             try tty_config.setColor(writer, .yellow);
             try writer.writeAll("loopback");
             try tty_config.setColor(writer, .reset);
             try tty_config.setColor(writer, .dim);
             needs_comma = true;
         }
-        if ((dev.flags & PCAP_IF_UP) > 0) {
+        if (dev.flags.up) {
             if (needs_comma) try writer.writeAll(", ");
             try tty_config.setColor(writer, .cyan);
             try writer.writeAll("up");
@@ -222,7 +226,7 @@ fn list_network_devices(writer: std.io.AnyWriter, tty_config: std.io.tty.Config,
             try tty_config.setColor(writer, .dim);
             needs_comma = true;
         }
-        if ((dev.flags & PCAP_IF_RUNNING) > 0) {
+        if (dev.flags.running) {
             if (needs_comma) try writer.writeAll(", ");
             try tty_config.setColor(writer, .blue);
             try writer.writeAll("running");
@@ -230,7 +234,7 @@ fn list_network_devices(writer: std.io.AnyWriter, tty_config: std.io.tty.Config,
             try tty_config.setColor(writer, .dim);
             needs_comma = true;
         }
-        if ((dev.flags & PCAP_IF_WIRELESS) > 0) {
+        if (dev.flags.wireless) {
             if (needs_comma) try writer.writeAll(", ");
             try tty_config.setColor(writer, .magenta);
             try writer.writeAll("wireless");
@@ -238,24 +242,23 @@ fn list_network_devices(writer: std.io.AnyWriter, tty_config: std.io.tty.Config,
             try tty_config.setColor(writer, .dim);
             needs_comma = true;
         }
-        switch (dev.flags & PCAP_IF_CONNECTION_STATUS) {
-            PCAP_IF_CONNECTION_STATUS_UNKNOWN => {
+        switch (dev.flags.connection_status) {
+            .unknown => {
                 if (needs_comma) try writer.writeAll(", ");
                 try tty_config.setColor(writer, .yellow);
                 try writer.writeAll("unknown status");
             },
-            PCAP_IF_CONNECTION_STATUS_CONNECTED => {
+            .connected => {
                 if (needs_comma) try writer.writeAll(", ");
                 try tty_config.setColor(writer, .green);
                 try writer.writeAll("connected");
             },
-            PCAP_IF_CONNECTION_STATUS_DISCONNECTED => {
+            .disconnected => {
                 if (needs_comma) try writer.writeAll(", ");
                 try tty_config.setColor(writer, .red);
                 try writer.writeAll("disconnected");
             },
-            PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE => {},
-            else => unreachable,
+            .not_applicable => {},
         }
         try tty_config.setColor(writer, .reset);
         try tty_config.setColor(writer, .dim);
