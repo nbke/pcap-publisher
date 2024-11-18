@@ -256,6 +256,12 @@ fn list_network_devices(writer: std.io.AnyWriter, tty_config: std.io.tty.Config,
         try tty_config.setColor(writer, .reset);
         try writer.writeByte('\n');
 
+        if (mem.eql(u8, mem.span(dev.name), "any")) {
+            try tty_config.setColor(writer, .red);
+            try writer.writeAll("    limitation: This device does NOT support promiscuous mode\n");
+            try tty_config.setColor(writer, .reset);
+        }
+
         if (dev.description) |descr| {
             try writer.print("    description: {s}\n", .{descr});
         }
@@ -309,6 +315,8 @@ const help_text =
     \\
     \\If PCAP file file is supplied, the packets are replayed instead of
     \\capturing live traffic from the network interface.
+    \\
+    \\Limitation: The 'any' device does not support promiscuous mode.
     \\
     \\Usage: pcap_publisher <COMMAND> [OPTIONS]
     \\
