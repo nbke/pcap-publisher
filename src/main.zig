@@ -32,34 +32,34 @@ const pcap_pkthdr = extern struct {
 };
 
 const TstampSource = enum(c_int) {
-    Host = 0,
-    HostLowprec = 1,
-    HostHiprec = 2,
-    Adapter = 3,
-    AdapterUnsynced = 4,
-    HostHiprecUnsynced = 5,
+    host = 0,
+    host_lowprec = 1,
+    host_hiprec = 2,
+    adapter = 3,
+    adapter_unsynced = 4,
+    host_hiprec_unsynced = 5,
 
     fn from_str(name: []const u8) ?TstampSource {
         const map = std.StaticStringMap(TstampSource).initComptime(.{
-            .{ "host", .Host },
-            .{ "host_lowprec", .HostLowprec },
-            .{ "host_hiprec", .HostHiprec },
-            .{ "host_hiprec_unsynced", .HostHiprecUnsynced },
-            .{ "adapter", .Adapter },
-            .{ "adapter_unsynced", .AdapterUnsynced },
+            .{ "host", .host },
+            .{ "host_lowprec", .host_lowprec },
+            .{ "host_hiprec", .host_hiprec },
+            .{ "host_hiprec_unsynced", .host_hiprec_unsynced },
+            .{ "adapter", .adapter },
+            .{ "adapter_unsynced", .adapter_unsynced },
         });
         return map.get(name);
     }
 };
 
 const TstampPrecision = enum(c_int) {
-    Micro = 0,
-    Nano = 1,
+    micro = 0,
+    nano = 1,
 
     fn from_str(name: []const u8) ?TstampPrecision {
         const map = std.StaticStringMap(TstampPrecision).initComptime(.{
-            .{ "micro", .Micro },
-            .{ "nano", .Nano },
+            .{ "micro", .micro },
+            .{ "nano", .nano },
         });
         return map.get(name);
     }
@@ -125,8 +125,8 @@ fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const
     // We convert Micros to Nanos so that we output standardized JSON.
     // https://github.com/the-tcpdump-group/libpcap/blob/e17fe06d6a54abc85fb17998d0cb1742d490382a/pcap-bpf.c#L1398
     const ts: timespec = switch (userdata.precision) {
-        .Micro => .{ .sec = header.ts.sec, .nsec = @as(isize, header.ts.usec) * 1_000 },
-        .Nano => .{ .sec = header.ts.sec, .nsec = header.ts.usec },
+        .micro => .{ .sec = header.ts.sec, .nsec = @as(isize, header.ts.usec) * 1_000 },
+        .nano => .{ .sec = header.ts.sec, .nsec = header.ts.usec },
     };
 
     var fbs = std.io.fixedBufferStream(userdata.scratch);
@@ -136,7 +136,7 @@ fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const
         return;
     };
 
-    if (userdata.verbose_level > 0) {
+    if (userdata.verbose_level > 1) {
         var io_vecs = [_]std.posix.iovec_const{
             .{ .base = fbs.buffer.ptr, .len = fbs.pos },
             .{ .base = "\n".ptr, .len = 1 },
@@ -353,7 +353,8 @@ const help_text =
     \\  -h, --help               Print help
     \\  -V, --version            Print version
     \\  -v, --verbose            Increase logging level. Can be used multiple times
-    \\                           1: published JSON message
+    \\                           1: metadata from captured device and MQTT connection
+    \\                           2: published JSON message
     \\
     \\MQTT Options:
     \\      --uri <VALUE>        URI of MQTT broker [default: tcp://localhost:1883]
@@ -416,8 +417,8 @@ pub fn main() !void {
     var prefix: ?[:0]const u8 = null;
     var username: ?[:0]const u8 = null;
     var password: ?[:0]const u8 = null;
-    var timestamp_source: TstampSource = .Adapter;
-    var timestamp_precision: TstampPrecision = .Nano;
+    var timestamp_source: TstampSource = .adapter;
+    var timestamp_precision: TstampPrecision = .nano;
     var dl_header: ?c_int = null;
     var enable_rfmon = false;
 
@@ -545,6 +546,23 @@ pub fn main() !void {
             std.process.exit(1);
         }
 
+        if (verbose_level > 0) {
+            try stdout.print("Live capture of network device '{s}':\n", .{dev});
+            try stdout.print("  timestamp source: {s}\n", .{@tagName(timestamp_source)});
+            try stdout.print("  timestamp precision: {s}\n", .{@tagName(timestamp_precision)});
+            try stdout.writeAll("  monitor mode (aka rfmon): ");
+            if (enable_rfmon) {
+                try tty_config.setColor(stdout, .green);
+                try stdout.writeAll("enabled");
+            } else {
+                try tty_config.setColor(stdout, .red);
+                try stdout.writeAll("disabled");
+            }
+            try tty_config.setColor(stdout, .reset);
+            try stdout.writeAll("\n\n");
+            try bw.flush();
+        }
+
         const activate_rc = pcap_activate(handle);
         if (activate_rc != 0) {
             stderr.print("Failed to start capture: {s}\n", .{pcap_statustostr(activate_rc)}) catch {};
@@ -560,17 +578,20 @@ pub fn main() !void {
             }
         }
 
-        var dlt_buf: [*]c_int = undefined;
-        const dl_list_rc = pcap_list_datalinks(handle, &dlt_buf);
-        if (dl_list_rc < 0) {
-            stderr.print("Failed to list datalink header types: {s}\n", .{pcap_geterr(handle)}) catch {};
-            std.process.exit(1);
-        }
-        defer pcap_free_datalinks(dlt_buf);
-        if (dl_list_rc > 0) {
-            try stdout.print("Supported datalink header types for device '{s}':\n", .{dev});
-            try list_dl_header_types(stdout.any(), tty_config, handle, dlt_buf[0..@intCast(dl_list_rc)]);
-            try bw.flush();
+        if (verbose_level > 0) {
+            var dlt_buf: [*]c_int = undefined;
+            const dl_list_rc = pcap_list_datalinks(handle, &dlt_buf);
+            if (dl_list_rc < 0) {
+                stderr.print("Failed to list datalink header types: {s}\n", .{pcap_geterr(handle)}) catch {};
+                std.process.exit(1);
+            }
+            defer pcap_free_datalinks(dlt_buf);
+            if (dl_list_rc > 0) {
+                try stdout.writeAll("Supported datalink header types:\n");
+                try list_dl_header_types(stdout.any(), tty_config, handle, dlt_buf[0..@intCast(dl_list_rc)]);
+                try stdout.writeByte('\n');
+                try bw.flush();
+            }
         }
 
         const userdata: Userdata = .{
