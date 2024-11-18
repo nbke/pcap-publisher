@@ -84,6 +84,13 @@ extern fn pcap_statustostr(errnum: c_int) callconv(.C) [*:0]const u8;
 extern fn pcap_findalldevs(alldevsp: *?*pcap_if, errbuf: [*:0]const u8) callconv(.C) c_int;
 extern fn pcap_freealldevs(alldevs: ?*pcap_if) callconv(.C) void;
 
+extern fn pcap_datalink(p: *pcap_t) callconv(.C) c_int;
+extern fn pcap_list_datalinks(p: *pcap_t, dlt_buf: *[*]c_int) callconv(.C) c_int;
+extern fn pcap_free_datalinks(dlt_list: [*]c_int) callconv(.C) void;
+extern fn pcap_set_datalink(p: *pcap_t, dlt: c_int) callconv(.C) c_int;
+extern fn pcap_datalink_val_to_name(dlt: c_int) callconv(.C) [*:0]const u8;
+extern fn pcap_datalink_val_to_description(dlt: c_int) callconv(.C) [*:0]const u8;
+
 extern fn pcap_create(device: [*:0]const u8, errbuf: [*:0]const u8) callconv(.C) ?*pcap_t;
 extern fn pcap_activate(p: *pcap_t) callconv(.C) c_int;
 extern fn pcap_set_snaplen(p: *pcap_t, snaplen: c_int) callconv(.C) c_int;
@@ -511,6 +518,29 @@ pub fn main() !void {
             stderr.print("Failed to start capture: {s}\n", .{pcap_statustostr(activate_rc)}) catch {};
             std.process.exit(1);
         }
+
+        var dlt_buf: [*]c_int = undefined;
+        const dl_list_rc = pcap_list_datalinks(handle, &dlt_buf);
+        if (dl_list_rc < 0) {
+            stderr.print("Failed to list datalink header types: {s}\n", .{pcap_geterr(handle)}) catch {};
+            std.process.exit(1);
+        }
+        defer pcap_free_datalinks(dlt_buf);
+        if (dl_list_rc > 0) {
+            const active_linktype = pcap_datalink(handle);
+            try stdout.print("Supported datalink header types for device '{s}':\n", .{dev});
+            for (dlt_buf[0..@intCast(dl_list_rc)]) |dlt| {
+                const name = pcap_datalink_val_to_name(dlt);
+                const descr = pcap_datalink_val_to_description(dlt);
+                try stdout.print("  - [{d}] {s}: {s}", .{ dlt, name, descr });
+                if (active_linktype == dlt) {
+                    try stdout.writeAll(" [ACTIVE]");
+                }
+                try stdout.writeByte('\n');
+            }
+            try bw.flush();
+        }
+        // TODO expose CLI option for pcap_set_datalink()
 
         const userdata: Userdata = .{
             .verbose_level = verbose_level,
