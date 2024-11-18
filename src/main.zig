@@ -68,6 +68,7 @@ extern fn pcap_create(device: [*:0]const u8, errbuf: [*:0]const u8) callconv(.C)
 extern fn pcap_activate(p: *pcap_t) callconv(.C) c_int;
 extern fn pcap_set_snaplen(p: *pcap_t, snaplen: c_int) callconv(.C) c_int;
 extern fn pcap_set_promisc(p: *pcap_t, promisc: c_int) callconv(.C) c_int;
+extern fn pcap_set_rfmon(p: *pcap_t, rfmon: c_int) callconv(.C) c_int;
 extern fn pcap_set_immediate_mode(p: *pcap_t, immediate: c_int) callconv(.C) c_int;
 extern fn pcap_set_buffer_size(p: *pcap_t, buffer_size: c_int) callconv(.C) c_int;
 extern fn pcap_set_timeout(p: *pcap_t, timeout_ms: c_int) callconv(.C) c_int;
@@ -315,14 +316,17 @@ const help_text =
     \\      --ts-type <ENUM>       Location where timestamp is recorded
     \\          'host' -> Host adds timestamp rather than capture device
     \\                    No commitment if timestamp will be low or high precision
-    \\          'host_lowprec' -> Host, low precision
-    \\          'host_hiprec' -> Host, high precision [Default]
+    \\          'host_lowprec'         -> Host, low precision
+    \\          'host_hiprec'          -> Host, high precision [Default]
     \\          'host_hiprec_unsynced' -> Host, high precision, not synced with system time
-    \\          'adapter' -> Adapter, high precision, synced with system time
-    \\          'adapter_unsynced' -> Adapter, high precision, not synced with system time
+    \\          'adapter'              -> Adapter, high precision, synced with system time
+    \\          'adapter_unsynced'     -> Adapter, high precision, not synced with system time
     \\      --ts-precision <ENUM>  Precision of network packet timestamps
     \\          'micro' -> microsecond precision
-    \\          'nano' -> nanosecond precision [Default]
+    \\          'nano'  -> nanosecond precision [Default]
+    \\      --rfmon                Enable capture of management or control frames
+    \\                             in IEEE 802.11 wireless LANs. Also enable 802.11 header
+    \\                             or radio information pseudo-header
     \\
     \\Replay Options:
     \\  -f, --file <PATH>        Path to .pcap file for replay
@@ -362,6 +366,7 @@ pub fn main() !void {
     var password: ?[:0]const u8 = null;
     var timestamp_type: c_int = PCAP_TSTAMP_ADAPTER;
     var timestamp_precision: TstampPrecision = .Nano;
+    var enable_rfmon = false;
 
     _ = args.skip(); // first argument is executable path
     while (args.next()) |arg| {
@@ -423,6 +428,8 @@ pub fn main() !void {
                 stderr.print("Invalid timestamp precision: {s}\n", .{raw_ts_precision}) catch {};
                 std.process.exit(1);
             };
+        } else if (mem.eql(u8, "--rfmon", arg)) {
+            enable_rfmon = true;
         } else if (mem.eql(u8, "--username", arg)) {
             username = args.next() orelse {
                 stderr.print("Missing argument for --username\n", .{}) catch {};
@@ -457,10 +464,11 @@ pub fn main() !void {
         // Immediate mode is needed because the packets should be sent directly via
         // MQTT without delay instead of batching them.
         _ = pcap_set_promisc(handle, 1);
+        if (enable_rfmon) _ = pcap_set_rfmon(handle, 1);
         _ = pcap_set_immediate_mode(handle, 1);
+        _ = pcap_set_timeout(handle, 100); // 100ms
         _ = pcap_set_snaplen(handle, 65535);
         _ = pcap_set_buffer_size(handle, 64 << 20); // 64MB
-        _ = pcap_set_timeout(handle, 100); // 100ms
 
         // Check if capture device supports requested timestamp type and precision
         const ts_type_rc = pcap_set_tstamp_type(handle, timestamp_type);
