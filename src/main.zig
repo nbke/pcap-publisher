@@ -315,6 +315,23 @@ fn list_network_devices(writer: std.io.AnyWriter, tty_config: std.io.tty.Config,
     }
 }
 
+fn list_dl_header_types(writer: std.io.AnyWriter, tty_config: std.io.tty.Config, handle: *pcap_t, dlt_buf: []c_int) !void {
+    const active_linktype = pcap_datalink(handle);
+    for (dlt_buf) |dlt| {
+        const name = pcap_datalink_val_to_name(dlt);
+        const descr = pcap_datalink_val_to_description(dlt);
+        try writer.print("  - [{d}] {s}: {s}", .{ dlt, name, descr });
+        if (active_linktype == dlt) {
+            try writer.writeAll(" [");
+            try tty_config.setColor(writer, .green);
+            try writer.writeAll("ACTIVE");
+            try tty_config.setColor(writer, .reset);
+            try writer.writeByte(']');
+        }
+        try writer.writeByte('\n');
+    }
+}
+
 const help_text =
     \\Capture network traffic using libpcap and publish it via MQTT.
     \\By default the hostname is used as client ID and all packets are
@@ -527,17 +544,8 @@ pub fn main() !void {
         }
         defer pcap_free_datalinks(dlt_buf);
         if (dl_list_rc > 0) {
-            const active_linktype = pcap_datalink(handle);
             try stdout.print("Supported datalink header types for device '{s}':\n", .{dev});
-            for (dlt_buf[0..@intCast(dl_list_rc)]) |dlt| {
-                const name = pcap_datalink_val_to_name(dlt);
-                const descr = pcap_datalink_val_to_description(dlt);
-                try stdout.print("  - [{d}] {s}: {s}", .{ dlt, name, descr });
-                if (active_linktype == dlt) {
-                    try stdout.writeAll(" [ACTIVE]");
-                }
-                try stdout.writeByte('\n');
-            }
+            try list_dl_header_types(stdout.any(), tty_config, handle, dlt_buf[0..@intCast(dl_list_rc)]);
             try bw.flush();
         }
         // TODO expose CLI option for pcap_set_datalink()
