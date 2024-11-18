@@ -31,6 +31,27 @@ const pcap_pkthdr = extern struct {
     len: c_uint, // length of this packet prior to any slicing
 };
 
+const TstampSource = enum(c_int) {
+    Host = 0,
+    HostLowprec = 1,
+    HostHiprec = 2,
+    Adapter = 3,
+    AdapterUnsynced = 4,
+    HostHiprecUnsynced = 5,
+
+    fn from_str(name: []const u8) ?TstampSource {
+        const map = std.StaticStringMap(TstampSource).initComptime(.{
+            .{ "host", .Host },
+            .{ "host_lowprec", .HostLowprec },
+            .{ "host_hiprec", .HostHiprec },
+            .{ "host_hiprec_unsynced", .HostHiprecUnsynced },
+            .{ "adapter", .Adapter },
+            .{ "adapter_unsynced", .AdapterUnsynced },
+        });
+        return map.get(name);
+    }
+};
+
 const TstampPrecision = enum(c_int) {
     Micro = 0,
     Nano = 1,
@@ -63,7 +84,6 @@ extern fn pcap_statustostr(errnum: c_int) callconv(.C) [*:0]const u8;
 extern fn pcap_findalldevs(alldevsp: *?*pcap_if, errbuf: [*:0]const u8) callconv(.C) c_int;
 extern fn pcap_freealldevs(alldevs: ?*pcap_if) callconv(.C) void;
 
-const PCAP_TSTAMP_ADAPTER: c_int = 3;
 extern fn pcap_create(device: [*:0]const u8, errbuf: [*:0]const u8) callconv(.C) ?*pcap_t;
 extern fn pcap_activate(p: *pcap_t) callconv(.C) c_int;
 extern fn pcap_set_snaplen(p: *pcap_t, snaplen: c_int) callconv(.C) c_int;
@@ -72,7 +92,6 @@ extern fn pcap_set_rfmon(p: *pcap_t, rfmon: c_int) callconv(.C) c_int;
 extern fn pcap_set_immediate_mode(p: *pcap_t, immediate: c_int) callconv(.C) c_int;
 extern fn pcap_set_buffer_size(p: *pcap_t, buffer_size: c_int) callconv(.C) c_int;
 extern fn pcap_set_tstamp_type(p: *pcap_t, tstamp_type: c_int) callconv(.C) c_int;
-extern fn pcap_tstamp_type_name_to_val(name: [*:0]const u8) callconv(.C) c_int;
 extern fn pcap_set_tstamp_precision(p: *pcap_t, tstamp_precision: c_int) callconv(.C) c_int;
 extern fn pcap_dispatch(p: *pcap_t, cnt: c_int, callback: pcap_handler, user: ?*c_char) callconv(.C) c_int;
 extern fn pcap_get_tstamp_precision(p: *pcap_t) callconv(.C) c_int;
@@ -312,7 +331,7 @@ const help_text =
     \\
     \\Capture Options:
     \\  -d, --dev <DEVICE>         Name of captured network interface
-    \\      --ts-type <ENUM>       Location where timestamp is recorded
+    \\      --ts-source <ENUM>     Location where timestamp is recorded
     \\          'host' -> Host adds timestamp rather than capture device
     \\                    No commitment if timestamp will be low or high precision
     \\          'host_lowprec'         -> Host, low precision
@@ -363,7 +382,7 @@ pub fn main() !void {
     var prefix: ?[:0]const u8 = null;
     var username: ?[:0]const u8 = null;
     var password: ?[:0]const u8 = null;
-    var timestamp_type: c_int = PCAP_TSTAMP_ADAPTER;
+    var timestamp_source: TstampSource = .Adapter;
     var timestamp_precision: TstampPrecision = .Nano;
     var enable_rfmon = false;
 
@@ -407,17 +426,15 @@ pub fn main() !void {
                 stderr.print("MQTT topic prefix must end with `/`: {s}\n", .{prefix.?}) catch {};
                 std.process.exit(1);
             }
-        } else if (mem.eql(u8, "--ts-type", arg)) {
-            const raw_ts_type = args.next() orelse {
-                stderr.print("Missing argument for --ts-type\n", .{}) catch {};
+        } else if (mem.eql(u8, "--ts-source", arg)) {
+            const raw_ts_source = args.next() orelse {
+                stderr.print("Missing argument for --ts-source\n", .{}) catch {};
                 std.process.exit(1);
             };
-            const ts_to_val_rc = pcap_tstamp_type_name_to_val(raw_ts_type.ptr);
-            if (ts_to_val_rc == -1) {
-                stderr.print("Invalid timestamp type: {s}\n", .{raw_ts_type}) catch {};
+            timestamp_source = TstampSource.from_str(raw_ts_source) orelse {
+                stderr.print("Invalid timestamp source: {s}\n", .{raw_ts_source}) catch {};
                 std.process.exit(1);
-            }
-            timestamp_type = ts_to_val_rc;
+            };
         } else if (mem.eql(u8, "--ts-precision", arg)) {
             const raw_ts_precision = args.next() orelse {
                 stderr.print("Missing argument for --ts-precision\n", .{}) catch {};
@@ -470,7 +487,7 @@ pub fn main() !void {
         _ = pcap_set_buffer_size(handle, 64 << 20); // 64MB
 
         // Check if capture device supports requested timestamp type and precision
-        const ts_type_rc = pcap_set_tstamp_type(handle, timestamp_type);
+        const ts_type_rc = pcap_set_tstamp_type(handle, @intFromEnum(timestamp_source));
         if (ts_type_rc != 0) {
             stderr.print("Failed to set timestamp type: {s}\n", .{pcap_statustostr(ts_type_rc)}) catch {};
             std.process.exit(1);
@@ -489,6 +506,8 @@ pub fn main() !void {
 
         const userdata: Userdata = .{
             .verbose_level = verbose_level,
+            // If the device doesn't support nano precision, it might fallback to micro without raising an error
+            // Thus get the actual precision or otherwise the timestamp calculation might be incorrect
             .precision = @enumFromInt(pcap_get_tstamp_precision(handle)),
             .scratch = try allocator.alloc(u8, 100_000),
         };
