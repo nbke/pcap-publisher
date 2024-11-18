@@ -71,7 +71,6 @@ extern fn pcap_set_promisc(p: *pcap_t, promisc: c_int) callconv(.C) c_int;
 extern fn pcap_set_rfmon(p: *pcap_t, rfmon: c_int) callconv(.C) c_int;
 extern fn pcap_set_immediate_mode(p: *pcap_t, immediate: c_int) callconv(.C) c_int;
 extern fn pcap_set_buffer_size(p: *pcap_t, buffer_size: c_int) callconv(.C) c_int;
-extern fn pcap_set_timeout(p: *pcap_t, timeout_ms: c_int) callconv(.C) c_int;
 extern fn pcap_set_tstamp_type(p: *pcap_t, tstamp_type: c_int) callconv(.C) c_int;
 extern fn pcap_tstamp_type_name_to_val(name: [*:0]const u8) callconv(.C) c_int;
 extern fn pcap_set_tstamp_precision(p: *pcap_t, tstamp_precision: c_int) callconv(.C) c_int;
@@ -461,12 +460,12 @@ pub fn main() !void {
         // The calls to change settings only fail if `pcap_activate` was already called.
         // Because of this we omit the error handling here. If a device i.e. does not
         // support promiscuous mode, the activate call will raise an error.
-        // Immediate mode is needed because the packets should be sent directly via
-        // MQTT without delay instead of batching them.
         _ = pcap_set_promisc(handle, 1);
         if (enable_rfmon) _ = pcap_set_rfmon(handle, 1);
+        // Immediate mode is needed because the packets should be sent directly via
+        // MQTT without delay instead of batching them.
+        // pcap_set_timeout() has no effect if immediate mode is active
         _ = pcap_set_immediate_mode(handle, 1);
-        _ = pcap_set_timeout(handle, 100); // 100ms
         _ = pcap_set_snaplen(handle, 65535);
         _ = pcap_set_buffer_size(handle, 64 << 20); // 64MB
 
