@@ -90,6 +90,7 @@ extern fn pcap_free_datalinks(dlt_list: [*]c_int) callconv(.C) void;
 extern fn pcap_set_datalink(p: *pcap_t, dlt: c_int) callconv(.C) c_int;
 extern fn pcap_datalink_val_to_name(dlt: c_int) callconv(.C) [*:0]const u8;
 extern fn pcap_datalink_val_to_description(dlt: c_int) callconv(.C) [*:0]const u8;
+extern fn pcap_datalink_name_to_val(name: [*:0]const u8) callconv(.C) c_int;
 
 extern fn pcap_create(device: [*:0]const u8, errbuf: [*:0]const u8) callconv(.C) ?*pcap_t;
 extern fn pcap_activate(p: *pcap_t) callconv(.C) c_int;
@@ -374,6 +375,7 @@ const help_text =
     \\      --ts-precision <ENUM>  Precision of network packet timestamps
     \\          'micro' -> microsecond precision
     \\          'nano'  -> nanosecond precision [Default]
+    \\      --dl-header <VALUE>    Datalink header type
     \\      --rfmon                Enable capture of management or control frames
     \\                             in IEEE 802.11 wireless LANs. Also enable 802.11 header
     \\                             or radio information pseudo-header
@@ -416,6 +418,7 @@ pub fn main() !void {
     var password: ?[:0]const u8 = null;
     var timestamp_source: TstampSource = .Adapter;
     var timestamp_precision: TstampPrecision = .Nano;
+    var dl_header: ?c_int = null;
     var enable_rfmon = false;
 
     _ = args.skip(); // first argument is executable path
@@ -476,6 +479,18 @@ pub fn main() !void {
                 stderr.print("Invalid timestamp precision: {s}\n", .{raw_ts_precision}) catch {};
                 std.process.exit(1);
             };
+        } else if (mem.eql(u8, "--dl-header", arg)) {
+            const raw_dl_header = args.next() orelse {
+                stderr.print("Missing argument for --dl-header\n", .{}) catch {};
+                std.process.exit(1);
+            };
+            switch (pcap_datalink_name_to_val(raw_dl_header)) {
+                -1 => {
+                    stderr.print("Invalid datalink header type: {s}\n", .{raw_dl_header}) catch {};
+                    std.process.exit(1);
+                },
+                else => |dlt| dl_header = dlt,
+            }
         } else if (mem.eql(u8, "--rfmon", arg)) {
             enable_rfmon = true;
         } else if (mem.eql(u8, "--username", arg)) {
@@ -536,6 +551,15 @@ pub fn main() !void {
             std.process.exit(1);
         }
 
+        if (dl_header) |dlt| {
+            if (pcap_set_datalink(handle, dlt) != 0) {
+                // pcap_set_datalink() only uses generic -1 error code. Retrieve the internal
+                // errbuf with `pcap_geterr` for detailed error message
+                stderr.print("Failed to set datalink header type: {s}\n", .{pcap_geterr(handle)}) catch {};
+                std.process.exit(1);
+            }
+        }
+
         var dlt_buf: [*]c_int = undefined;
         const dl_list_rc = pcap_list_datalinks(handle, &dlt_buf);
         if (dl_list_rc < 0) {
@@ -548,7 +572,6 @@ pub fn main() !void {
             try list_dl_header_types(stdout.any(), tty_config, handle, dlt_buf[0..@intCast(dl_list_rc)]);
             try bw.flush();
         }
-        // TODO expose CLI option for pcap_set_datalink()
 
         const userdata: Userdata = .{
             .verbose_level = verbose_level,
