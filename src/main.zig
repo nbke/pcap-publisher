@@ -6,6 +6,16 @@ const socklen_t = std.c.socklen_t;
 const timeval = std.c.timeval;
 const timespec = std.posix.timespec;
 const AF = std.posix.AF;
+const mqtt = @import("paho_mqtt_zig");
+const DotEnv = @import("dot_env.zig");
+
+const ExitSignal = enum(u32) {
+    Continue,
+    Shutdown,
+    Failure,
+};
+// If the exit singal is not `Continue`, any long running function should exit with `error.Cancelled`.
+var exit_signal = std.atomic.Value(u32).init(@intFromEnum(ExitSignal.Continue));
 
 const pcap_t = opaque {};
 
@@ -54,7 +64,7 @@ const TstampSource = enum(c_int) {
     host_hiprec_unsynced = 5,
 
     fn from_str(name: []const u8) ?TstampSource {
-        const map = std.StaticStringMap(TstampSource).initComptime(.{
+        const map: std.StaticStringMap(TstampSource) = .initComptime(.{
             .{ "host", .host },
             .{ "host_lowprec", .host_lowprec },
             .{ "host_hiprec", .host_hiprec },
@@ -71,7 +81,7 @@ const TstampPrecision = enum(c_int) {
     nano = 1,
 
     fn from_str(name: []const u8) ?TstampPrecision {
-        const map = std.StaticStringMap(TstampPrecision).initComptime(.{
+        const map: std.StaticStringMap(TstampPrecision) = .initComptime(.{
             .{ "micro", .micro },
             .{ "nano", .nano },
         });
@@ -119,6 +129,8 @@ const Userdata = struct {
     // Thus use a 100KB scratch buffer for the conversion of the packet to JSON
     // 65535 / 3 * 4 = 87380 for payload encoded as base64
     scratch: []u8,
+    mqtt_client: mqtt.MqttAsync,
+    prefixed_topic: [:0]const u8,
 };
 
 // header and packet pointers are invalid after this callback returns
@@ -148,6 +160,12 @@ fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const
         // ignore error if we can't print the JSON message
         std.io.getStdOut().writevAll(&io_vecs) catch {};
     }
+
+    var msg: mqtt.MqttMessage = .{ .payloadlen = @intCast(fbs.pos), .payload = fbs.buffer.ptr };
+    var call_opt: mqtt.MqttAsync.CallOptions = .{};
+    userdata.mqtt_client.sendMessage(userdata.prefixed_topic.ptr, &msg, &call_opt) catch |err| {
+        log.warn("can't start to send message: {s}", .{@errorName(err)});
+    };
 }
 
 // use `anytype` instead of `io.AnyWriter` for improved performance
@@ -177,6 +195,186 @@ fn packet_to_json(writer: anytype, ts: timespec, len: usize, packet: []const u8)
     try json_stream.stream.writeByte('"');
     json_stream.endWriteRaw();
     try json_stream.endObject();
+}
+
+fn connectToBroker(client: mqtt.MqttAsync, opt: *const mqtt.MqttAsync.ConnectOptions) !bool {
+    const State = enum(u32) { Start, Success, Failure };
+    var shared_context = std.atomic.Value(u32).init(@intFromEnum(State.Start));
+    const cb = struct {
+        fn onSuccess5(context: ?*anyopaque, response: *mqtt.MqttAsync.SuccessData5) callconv(.C) void {
+            _ = response;
+            var my_context: *@TypeOf(shared_context) = @alignCast(@ptrCast(context));
+            _ = my_context.store(@intFromEnum(State.Success), .release);
+            std.Thread.Futex.wake(my_context, 1);
+        }
+
+        fn onFailure5(context: ?*anyopaque, response: *mqtt.MqttAsync.FailureData5) callconv(.C) void {
+            var my_context: *@TypeOf(shared_context) = @alignCast(@ptrCast(context));
+            if (response.message) |fail_msg| {
+                log.err("connection to MQTT broker failed (code {}, reason {}): {s}", .{
+                    response.code,
+                    @intFromEnum(response.reasonCode),
+                    fail_msg,
+                });
+            } else {
+                log.err("connection to MQTT broker failed (code {}, reason {})", .{
+                    response.code,
+                    @intFromEnum(response.reasonCode),
+                });
+            }
+            _ = my_context.store(@intFromEnum(State.Failure), .release);
+            std.Thread.Futex.wake(my_context, 1);
+        }
+    };
+
+    var connect_opt: mqtt.MqttAsync.ConnectOptions = opt.*;
+    connect_opt.context = &shared_context;
+    connect_opt.onSuccess5 = &cb.onSuccess5;
+    connect_opt.onFailure5 = &cb.onFailure5;
+    try client.connect(&connect_opt);
+
+    var conn_state: State = undefined;
+    while (true) {
+        if (@as(ExitSignal, @enumFromInt(exit_signal.load(.acquire))) != .Continue)
+            return error.Cancelled;
+        conn_state = @enumFromInt(shared_context.load(.acquire));
+        if (conn_state != .Start) break;
+        std.Thread.Futex.wait(&shared_context, @intFromEnum(State.Start));
+    }
+    return switch (conn_state) {
+        .Start => unreachable,
+        .Failure => false,
+        .Success => true,
+    };
+}
+
+fn create_mqtt_client(
+    client_id: [:0]const u8,
+    uri: [:0]const u8,
+    username: ?[:0]const u8,
+    password: ?[:0]const u8,
+) !mqtt.MqttAsync {
+    var create_opt: mqtt.MqttAsync.CreateOptions = .{ .MQTTVersion = .v5, .sendWhileDisconnected = 1 };
+    const client_handle = mqtt.MqttAsync.createWithOptions(uri, client_id, .None, null, &create_opt) catch |err| {
+        log.err("can't create MQTT Client: {s}", .{@errorName(err)});
+        return error.createClient;
+    };
+    client_handle.setCallbacks(null, &onConnectionLost, &onMessageArrived, null) catch |err| {
+        log.err("can't register 'onConnectionLost' and 'onMessageArrived' callback: {s}", .{@errorName(err)});
+        return error.registerCallback;
+    };
+    client_handle.setDisconnected(null, &onDisconnect) catch |err| {
+        log.err("can't register 'onDisconnect' callback: {s}", .{@errorName(err)});
+        return error.registerCallback;
+    };
+
+    const ssl_cb = struct {
+        // https://github.com/eclipse/paho.mqtt.c/blob/6b1e202a701ffcdaa277b5644ed291287a70a7aa/src/SSLSocket.c#L97
+        // first paho-mqtt-c retrieves the error code with OpenSSL `SSL_get_error`
+        // https://www.openssl.org/docs/man1.1.1/man3/SSL_get_error.html
+        // Then it passes a pointer to this function and the error code to `ERR_print_errors_cb`
+        // https://www.openssl.org/docs/manmaster/man3/ERR_print_errors.html
+        fn sslErrCB(str: [*]const u8, len: usize, u: *anyopaque) callconv(.C) c_int {
+            _ = u;
+            // Usually OpenSSL error logs end with a new line. Remove it because
+            // our Zig logging handler already adds `\n`.
+            const new_len = if (len > 0 and str[len - 1] == '\n') len - 1 else len;
+            log.err("OpenSSL: {s}", .{str[0..new_len]});
+            // This callback will be called multiple times if there are cascading errors.
+            // Return codes 0 and smaller abort this loop and only print the first error.
+            // https://github.com/openssl/openssl/blob/f6ce48f5b8ad4d8d748ea87d2490cbed08db9936/crypto/err/err_prn.c#L44
+            return 1;
+        }
+    };
+    var ssl_opt: mqtt.SslOptions = .{
+        .enableServerCertAuth = 0,
+        .verify = 1,
+        .ssl_error_cb = &ssl_cb.sslErrCB,
+    };
+    const connect_opt: mqtt.MqttAsync.ConnectOptions = .{
+        .username = if (username) |u| @constCast(u).ptr else null,
+        .password = if (password) |p| @constCast(p).ptr else null,
+        .ssl = &ssl_opt,
+        .automaticReconnect = 1,
+        .maxRetryInterval = 15,
+    };
+    while (true) {
+        if (@as(ExitSignal, @enumFromInt(exit_signal.load(.acquire))) != .Continue)
+            return error.Cancelled;
+        const isConnected = connectToBroker(client_handle, &connect_opt) catch |err| {
+            log.err("can't start to connect to MQTT broker: {s}", .{@errorName(err)});
+            return err;
+        };
+
+        if (isConnected) break;
+        log.info("Retrying to connect to the MQTT broker in 1 second", .{});
+        std.time.sleep(1 * std.time.ns_per_s);
+    }
+
+    // register callback for reconnect after initial connection is established
+    // in order to prevent duplicate log messages
+    client_handle.setConnected(null, &onReconnect) catch |err| {
+        log.err("can't register callback for reconnect to broker: {s}", .{@errorName(err)});
+        return error.registerCallback;
+    };
+
+    return client_handle;
+}
+
+fn mqttTraceCallback(level: mqtt.MqttAsync.TraceLevel, message: [*:0]u8) callconv(.C) void {
+    const fmt = "paho ({s}): {s}";
+    switch (level) {
+        .Maximum, .Medium, .Minimum => log.debug(fmt, .{ @tagName(level), message }),
+        .Protocol => log.debug(fmt, .{ @tagName(level), message }),
+        // paho library error is usually handled in gracefully
+        .Error => log.warn(fmt, .{ @tagName(level), message }),
+        .Severe, .Fatal => log.err(fmt, .{ @tagName(level), message }),
+    }
+}
+
+fn onConnectionLost(context: ?*anyopaque, cause: ?[*:0]u8) callconv(.C) void {
+    _ = context;
+    if (cause) |c| {
+        log.err("lost connection to MQTT broker: {s}", .{c});
+    } else {
+        log.err("lost connection to MQTT broker", .{});
+    }
+}
+
+fn onReconnect(context: ?*anyopaque, cause: ?[*:0]u8) callconv(.C) void {
+    _ = context;
+    if (cause) |c| {
+        log.info("reconnected to MQTT broker: {s}", .{c});
+    } else {
+        log.info("reconnected to MQTT broker", .{});
+    }
+}
+
+fn onDisconnect(
+    context: ?*anyopaque,
+    properties: *mqtt.MqttProperties,
+    reasonCode: mqtt.MqttReasonCode,
+) callconv(.C) void {
+    _ = context;
+    _ = properties;
+    _ = mqtt.reason(reasonCode) catch |err| {
+        log.warn("received disconnect packet: {s}", .{@errorName(err)});
+        return;
+    };
+    log.warn("received disconnect packet without reason code", .{});
+}
+
+fn onMessageArrived(
+    context: ?*anyopaque,
+    topicName: [*:0]u8,
+    topicLen: c_int,
+    message: *mqtt.MqttMessage,
+) callconv(.C) c_int {
+    _ = context;
+    _ = topicName;
+    _ = topicLen;
+    _ = message;
+    return 1; // message has been successfully handled
 }
 
 fn write_sockaddr(writer: std.io.AnyWriter, addr: *sockaddr) !void {
@@ -519,7 +717,39 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
+    var dot_env: DotEnv = .{};
+    try dot_env.read_file(allocator);
+    defer dot_env.deinit(allocator);
+
+    if (verbose_level > 0) {
+        // paho-mqtt-c uses `Log_output` instead of `Log` in `Log_initialize`,
+        // which ignores the logging level. As a workaround we only register
+        // the trace callback if verbose logging is enabled, so that we don't
+        // output the paho-mqtt-c "Trace Output" metadata.
+        // https://github.com/eclipse/paho.mqtt.c/blob/master/src/Log.c#L199
+        mqtt.MqttAsync.setTraceLevel(switch (verbose_level) {
+            0 => unreachable,
+            1 => .Error,
+            2 => .Protocol,
+            else => .Maximum,
+        });
+        mqtt.MqttAsync.setTraceCallback(&mqttTraceCallback);
+    }
+    var init_opt: mqtt.InitOptions = .{ .do_openssl_init = 1 };
+    mqtt.MqttAsync.globalInit(&init_opt);
+
+    const cid = client_id orelse "pcap_publisher";
+    const mqtt_client = try create_mqtt_client(
+        cid,
+        broker_uri orelse "tcp://localhost:1883",
+        username orelse try dot_env.get(allocator, "MQTT_USERNAME"),
+        password orelse try dot_env.get(allocator, "MQTT_PASSWORD"),
+    );
+
     if (capture_dev) |dev| {
+        const prefixed_topic = try std.fmt.allocPrintZ(allocator, "{s}pcap/{s}/dev/{s}", .{ prefix orelse "", cid, dev });
+        defer allocator.free(prefixed_topic);
+
         const handle = pcap_create(dev, &errbuf) orelse {
             stderr.print("Failed to create capture device for '{s}': {s}\n", .{ dev, errbuf }) catch {};
             std.process.exit(1);
@@ -553,7 +783,7 @@ pub fn main() !void {
             try stdout.print("Live capture of network device '{s}':\n", .{dev});
             try stdout.print("  timestamp source: {s}\n", .{@tagName(timestamp_source)});
             try stdout.print("  timestamp precision: {s}\n", .{@tagName(timestamp_precision)});
-            try stdout.writeAll("  monitor mode (aka rfmon): ");
+            try stdout.writeAll("  WiFi monitor mode (aka rfmon): ");
             if (enable_rfmon) {
                 try tty_config.setColor(stdout, .green);
                 try stdout.writeAll("enabled");
@@ -603,6 +833,8 @@ pub fn main() !void {
             // Thus get the actual precision or otherwise the timestamp calculation might be incorrect
             .precision = @enumFromInt(pcap_get_tstamp_precision(handle)),
             .scratch = try allocator.alloc(u8, 100_000),
+            .mqtt_client = mqtt_client,
+            .prefixed_topic = prefixed_topic,
         };
         defer allocator.free(userdata.scratch);
         while (true) {

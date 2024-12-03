@@ -25,6 +25,14 @@ pub fn build(b: *std.Build) void {
         exe.linkLibrary(lib_pcap);
     }
 
+    const paho_mqtt_zig = b.dependency("paho_mqtt_zig", .{
+        .target = target,
+        .optimize = optimize,
+        .client_mode = .@"async",
+        .enable_ssl = true,
+    });
+    exe.root_module.addImport("paho_mqtt_zig", paho_mqtt_zig.module("paho_mqtt_zig"));
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
