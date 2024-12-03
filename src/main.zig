@@ -134,7 +134,7 @@ const Userdata = struct {
 };
 
 // header and packet pointers are invalid after this callback returns
-fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_char) callconv(.C) void {
+fn capture_cb(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_char) callconv(.C) void {
     const userdata: *Userdata = @alignCast(@ptrCast(user.?));
 
     // In nano precision mode the tv_nsec from timespec is stored in tv_usec from timeval.
@@ -161,11 +161,40 @@ fn capture_callback(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const
         std.io.getStdOut().writevAll(&io_vecs) catch {};
     }
 
+    var call_opt: mqtt.MqttAsync.CallOptions = .{
+        .context = null,
+        .onSuccess5 = &sendMsg_success_cb,
+        .onFailure5 = &sendMsg_failure_cb,
+        .properties = .{},
+    };
     var msg: mqtt.MqttMessage = .{ .payloadlen = @intCast(fbs.pos), .payload = fbs.buffer.ptr };
-    var call_opt: mqtt.MqttAsync.CallOptions = .{};
     userdata.mqtt_client.sendMessage(userdata.prefixed_topic.ptr, &msg, &call_opt) catch |err| {
         log.warn("can't start to send message: {s}", .{@errorName(err)});
     };
+}
+
+fn sendMsg_success_cb(context: ?*anyopaque, response: *mqtt.MqttAsync.SuccessData5) callconv(.C) void {
+    _ = context;
+    const msg = response.alt.@"pub".message;
+    const topic = response.alt.@"pub".destinationName;
+    _ = msg;
+    log.info("Sent message to {s}", .{topic});
+}
+
+fn sendMsg_failure_cb(context: ?*anyopaque, response: *mqtt.MqttAsync.FailureData5) callconv(.C) void {
+    _ = context;
+    if (response.message) |fail_msg| {
+        log.err("send message failed (code {}, reason {}): {s}", .{
+            response.code,
+            @intFromEnum(response.reasonCode),
+            fail_msg,
+        });
+    } else {
+        log.err("send message failed (code {}, reason {})", .{
+            response.code,
+            @intFromEnum(response.reasonCode),
+        });
+    }
 }
 
 // use `anytype` instead of `io.AnyWriter` for improved performance
@@ -840,7 +869,7 @@ pub fn main() !void {
         while (true) {
             // Dispatch will return either if the callback was triggered 50 times or the timeout was reached
             // If rc is positive, it represents the number of captured packets
-            const dispatch_rc = pcap_dispatch(handle, 50, capture_callback, @constCast(@ptrCast(&userdata)));
+            const dispatch_rc = pcap_dispatch(handle, 50, &capture_cb, @constCast(@ptrCast(&userdata)));
             if (dispatch_rc < 0) {
                 log.err("Could not run capture callback: {s}", .{pcap_statustostr(dispatch_rc)});
                 continue;
