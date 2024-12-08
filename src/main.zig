@@ -152,13 +152,24 @@ fn capture_cb(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_cha
         return;
     };
 
+    const properties = [_]mqtt.MqttProperty{
+        .from_byte(.PAYLOAD_FORMAT_INDICATOR, 1),
+        .from_utf8_str(.CONTENT_TYPE, "application/json"),
+        .from_uf8_str_pair(.USER_PROPERTY, "schema", "1"),
+        .from_uf8_str_pair(.USER_PROPERTY, "sensor", "pcap"),
+    };
     var call_opt: mqtt.MqttAsync.CallOptions = .{
-        .context = null,
+        .context = @ptrCast(userdata),
         .onSuccess5 = &sendMsg_success_cb,
         .onFailure5 = &sendMsg_failure_cb,
-        .properties = .{},
     };
-    var msg: mqtt.MqttMessage = .{ .payloadlen = @intCast(fbs.pos), .payload = fbs.buffer.ptr };
+    var msg: mqtt.MqttMessage = .{
+        .payloadlen = @intCast(fbs.pos),
+        .payload = fbs.buffer.ptr,
+        .qos = .FireAndForget,
+        .retained = @intFromBool(false),
+        .properties = .{ .count = properties.len, .array = @constCast(@ptrCast(&properties)) },
+    };
     userdata.mqtt_client.sendMessage(userdata.prefixed_topic.ptr, &msg, &call_opt) catch |err| {
         log.warn("can't start to send message: {s}", .{@errorName(err)});
     };
