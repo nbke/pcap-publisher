@@ -364,15 +364,25 @@ fn create_mqtt_client(
     return client_handle;
 }
 
+// Don't use `std.log` here, because it does not allow changing the logging
+// level at runtime. We set the trace level in main with `MqttAsync.setTraceLevel`,
+// so we don't need to do any filtering here.
+//
+// Note about newfstatat syscall:
+// Log_formatTraceEntry constructs the `message` string. It calls `localtime`,
+// which calls `newfstatat`.
 fn mqttTraceCallback(level: mqtt.MqttAsync.TraceLevel, message: [*:0]u8) callconv(.C) void {
-    const fmt = "paho ({s}): {s}";
-    switch (level) {
-        .Maximum, .Medium, .Minimum => log.debug(fmt, .{ @tagName(level), message }),
-        .Protocol => log.debug(fmt, .{ @tagName(level), message }),
-        // paho library error is usually handled in gracefully
-        .Error => log.warn(fmt, .{ @tagName(level), message }),
-        .Severe, .Fatal => log.err(fmt, .{ @tagName(level), message }),
-    }
+    const level_str = @tagName(level);
+    const msg_slice = mem.span(message);
+    var io_vecs = [_]std.posix.iovec_const{
+        .{ .base = "paho (".ptr, .len = 6 },
+        .{ .base = level_str.ptr, .len = level_str.len },
+        .{ .base = "): ".ptr, .len = 3 },
+        .{ .base = msg_slice.ptr, .len = msg_slice.len },
+        .{ .base = "\n".ptr, .len = 1 },
+    };
+    // ignore error if we can't print the JSON message
+    std.io.getStdOut().writevAll(&io_vecs) catch {};
 }
 
 fn onConnectionLost(context: ?*anyopaque, cause: ?[*:0]u8) callconv(.C) void {
