@@ -152,15 +152,6 @@ fn capture_cb(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_cha
         return;
     };
 
-    if (userdata.verbose_level > 1) {
-        var io_vecs = [_]std.posix.iovec_const{
-            .{ .base = fbs.buffer.ptr, .len = fbs.pos },
-            .{ .base = "\n".ptr, .len = 1 },
-        };
-        // ignore error if we can't print the JSON message
-        std.io.getStdOut().writevAll(&io_vecs) catch {};
-    }
-
     var call_opt: mqtt.MqttAsync.CallOptions = .{
         .context = null,
         .onSuccess5 = &sendMsg_success_cb,
@@ -174,11 +165,23 @@ fn capture_cb(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_cha
 }
 
 fn sendMsg_success_cb(context: ?*anyopaque, response: *mqtt.MqttAsync.SuccessData5) callconv(.C) void {
-    _ = context;
+    const userdata: *Userdata = @alignCast(@ptrCast(context.?));
     const msg = response.alt.@"pub".message;
-    const topic = response.alt.@"pub".destinationName;
-    _ = msg;
-    log.info("Sent message to {s}", .{topic});
+    const payload = msg.payload.?[0..@intCast(msg.payloadlen)];
+    const topic = mem.span(response.alt.@"pub".destinationName);
+    // The "protocol" logging level of paho-mqtt-c already outputs all published
+    // messages, but it truncates after 20 bytes.
+    if (userdata.verbose_level > 1) {
+        // `fmt.print` emits separate `write` syscalls for every format argument
+        var io_vecs = [_]std.posix.iovec_const{
+            .{ .base = topic.ptr, .len = topic.len },
+            .{ .base = " -> ".ptr, .len = 4 },
+            .{ .base = payload.ptr, .len = payload.len },
+            .{ .base = "\n".ptr, .len = 1 },
+        };
+        // ignore error if we can't print the JSON message
+        std.io.getStdOut().writevAll(&io_vecs) catch {};
+    }
 }
 
 fn sendMsg_failure_cb(context: ?*anyopaque, response: *mqtt.MqttAsync.FailureData5) callconv(.C) void {
