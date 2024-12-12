@@ -312,6 +312,10 @@ fn create_mqtt_client(
         log.err("can't register 'onConnectionLost' and 'onMessageArrived' callback: {s}", .{@errorName(err)});
         return error.registerCallback;
     };
+    client_handle.setConnected(null, &onConnect) catch |err| {
+        log.err("can't register callback for reconnect to broker: {s}", .{@errorName(err)});
+        return error.registerCallback;
+    };
     client_handle.setDisconnected(null, &onDisconnect) catch |err| {
         log.err("can't register 'onDisconnect' callback: {s}", .{@errorName(err)});
         return error.registerCallback;
@@ -359,14 +363,6 @@ fn create_mqtt_client(
         log.info("Retrying to connect to the MQTT broker in 1 second", .{});
         std.time.sleep(1 * std.time.ns_per_s);
     }
-
-    // register callback for reconnect after initial connection is established
-    // in order to prevent duplicate log messages
-    client_handle.setConnected(null, &onReconnect) catch |err| {
-        log.err("can't register callback for reconnect to broker: {s}", .{@errorName(err)});
-        return error.registerCallback;
-    };
-
     return client_handle;
 }
 
@@ -400,13 +396,10 @@ fn onConnectionLost(context: ?*anyopaque, cause: ?[*:0]u8) callconv(.C) void {
     }
 }
 
-fn onReconnect(context: ?*anyopaque, cause: ?[*:0]u8) callconv(.C) void {
+fn onConnect(context: ?*anyopaque, cause: ?[*:0]u8) callconv(.C) void {
     _ = context;
-    if (cause) |c| {
-        log.info("reconnected to MQTT broker: {s}", .{c});
-    } else {
-        log.info("reconnected to MQTT broker", .{});
-    }
+    _ = cause; // useless information: "connect onSuccess called"
+    log.info("Connected to MQTT broker", .{});
 }
 
 fn onDisconnect(
