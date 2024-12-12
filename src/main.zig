@@ -189,11 +189,13 @@ fn sendMsg_success_cb(context: ?*anyopaque, response: *mqtt.MqttAsync.SuccessDat
     const userdata: *Userdata = @alignCast(@ptrCast(context.?));
     const msg = response.alt.@"pub".message;
     if (msg.payload) |payload| {
-        const topic = mem.span(response.alt.@"pub".destinationName); // TODO check for null
+        const topic = if (response.alt.@"pub".destinationName) |destName| mem.span(destName) else "<unknown>";
         const payload_slice = payload[0..@intCast(msg.payloadlen)];
         // The "protocol" logging level of paho-mqtt-c already outputs all published
         // messages, but it truncates after 20 bytes.
         if (userdata.verbose_level > 1) {
+            // TODO if delivery queue has max size, the log message starts with: <unknown> -> �N"nsec
+            //      the start of the buffer is missing, because it should begin with `"ts": {"sec": ...`
             // `fmt.print` emits separate `write` syscalls for every format argument
             var io_vecs = [_]std.posix.iovec_const{
                 .{ .base = topic.ptr, .len = topic.len },
