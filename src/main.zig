@@ -9,6 +9,9 @@ const AF = std.posix.AF;
 const mqtt = @import("paho_mqtt_zig");
 const DotEnv = @import("dot_env.zig");
 
+// size of linked list of PUBLISH messages waiting to be processed
+const MAX_BUFFERED_MSG = 500;
+
 const ExitSignal = enum(u32) {
     Continue,
     Shutdown,
@@ -170,8 +173,15 @@ fn capture_cb(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_cha
         .retained = @intFromBool(false),
         .properties = .{ .count = properties.len, .array = @constCast(@ptrCast(&properties)) },
     };
-    userdata.mqtt_client.sendMessage(userdata.prefixed_topic.ptr, &msg, &call_opt) catch |err| {
-        log.warn("can't start to send message: {s}", .{@errorName(err)});
+    userdata.mqtt_client.sendMessage(userdata.prefixed_topic.ptr, &msg, &call_opt) catch |err| switch (err) {
+        error.MaxBufferedMessages => {
+            if (pending_delivery_tokens(userdata.mqtt_client)) |queue_size| {
+                log.warn("could not publish message, because buffer is full (delivery queue: {d}/{d})", .{ queue_size, MAX_BUFFERED_MSG });
+            } else {
+                log.warn("could not publish message, because buffer is full", .{});
+            }
+        },
+        else => log.warn("can't start to send message: {s}", .{@errorName(err)}),
     };
 }
 
@@ -303,7 +313,7 @@ fn create_mqtt_client(
     username: ?[:0]const u8,
     password: ?[:0]const u8,
 ) !mqtt.MqttAsync {
-    var create_opt: mqtt.MqttAsync.CreateOptions = .{ .MQTTVersion = .v5, .sendWhileDisconnected = 1 };
+    var create_opt: mqtt.MqttAsync.CreateOptions = .{ .MQTTVersion = .v5, .sendWhileDisconnected = 1, .maxBufferedMessages = MAX_BUFFERED_MSG };
     const client_handle = mqtt.MqttAsync.createWithOptions(uri, client_id, .None, null, &create_opt) catch |err| {
         log.err("can't create MQTT Client: {s}", .{@errorName(err)});
         return error.createClient;
@@ -364,6 +374,22 @@ fn create_mqtt_client(
         std.time.sleep(1 * std.time.ns_per_s);
     }
     return client_handle;
+}
+
+fn pending_delivery_tokens(client: mqtt.MqttAsync) ?usize {
+    var tokens: ?[*]mqtt.MqttAsync.AsyncToken = null;
+    client.getPendingTokens(&tokens) catch |getTokens_err| {
+        log.warn("can't get pending delivery tokens: {s}", .{@errorName(getTokens_err)});
+        return null;
+    };
+    defer if (tokens) |t| mqtt.MqttAsync.free(t);
+
+    if (tokens) |tok_list| {
+        var idx: usize = 0;
+        while (@intFromEnum(tok_list[idx]) != -1) : (idx += 1) {}
+        return idx;
+    }
+    return 0;
 }
 
 // Don't use `std.log` here, because it does not allow changing the logging

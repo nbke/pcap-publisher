@@ -8,8 +8,8 @@
             .hash = "1220b2a91034c890a1d5b7fbfdea4a528fdf2e95201d6cad61d56e24e5962c00da7a",
         },
         .paho_mqtt_zig = .{
-            .url = "https://github.com/nbke/paho.mqtt.zig/archive/25795d597b87cb84ddbee6da4e9b68b67d5b3c81.tar.gz",
-            .hash = "122003faf90a6bd648ee29cdc81225787dbf433751b09604dde35367d8c891670af9",
+            .url = "https://github.com/nbke/paho.mqtt.zig/archive/ef3e3b19e46adac7d70fd6d7d41a5189d5f338cd.tar.gz",
+            .hash = "12206170ca2655df3db09b86a9d94f6dc3e23de8a3f6f72f376c769f2a59244b632e",
         },
     },
     .paths = .{
