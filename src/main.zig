@@ -178,20 +178,26 @@ fn capture_cb(user: ?*c_char, header: *const pcap_pkthdr, packet: [*]const c_cha
 fn sendMsg_success_cb(context: ?*anyopaque, response: *mqtt.MqttAsync.SuccessData5) callconv(.C) void {
     const userdata: *Userdata = @alignCast(@ptrCast(context.?));
     const msg = response.alt.@"pub".message;
-    const payload = msg.payload.?[0..@intCast(msg.payloadlen)];
-    const topic = mem.span(response.alt.@"pub".destinationName);
-    // The "protocol" logging level of paho-mqtt-c already outputs all published
-    // messages, but it truncates after 20 bytes.
-    if (userdata.verbose_level > 1) {
-        // `fmt.print` emits separate `write` syscalls for every format argument
-        var io_vecs = [_]std.posix.iovec_const{
-            .{ .base = topic.ptr, .len = topic.len },
-            .{ .base = " -> ".ptr, .len = 4 },
-            .{ .base = payload.ptr, .len = payload.len },
-            .{ .base = "\n".ptr, .len = 1 },
-        };
-        // ignore error if we can't print the JSON message
-        std.io.getStdOut().writevAll(&io_vecs) catch {};
+    if (msg.payload) |payload| {
+        const topic = mem.span(response.alt.@"pub".destinationName); // TODO check for null
+        const payload_slice = payload[0..@intCast(msg.payloadlen)];
+        // The "protocol" logging level of paho-mqtt-c already outputs all published
+        // messages, but it truncates after 20 bytes.
+        if (userdata.verbose_level > 1) {
+            // `fmt.print` emits separate `write` syscalls for every format argument
+            var io_vecs = [_]std.posix.iovec_const{
+                .{ .base = topic.ptr, .len = topic.len },
+                .{ .base = " -> ".ptr, .len = 4 },
+                .{ .base = payload_slice.ptr, .len = payload_slice.len },
+                .{ .base = "\n".ptr, .len = 1 },
+            };
+            // ignore error if we can't print the JSON message
+            std.io.getStdOut().writevAll(&io_vecs) catch {};
+        }
+    } else {
+        // If the connection to the broker is not yet established and a lot of messages
+        // are published, `maxBufferedMessages` will cause the payload and topic to be discarded.
+        log.debug("sendMsg success callback: discarded payload and topic", .{});
     }
 }
 
